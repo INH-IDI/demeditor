@@ -1,0 +1,56 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Distribution / Packaging
+dist/
+build/
+*.egg-info/
+
+# Data files (large)
+*.dep
+*.nc
+*.tif
+*.tiff
+*.asc
+*.dat
+*.txt
+
+# Logs
+*.log
+
+# Screenshots
+*.png
+*.jpg
+*.jpeg
+
+# Environment variables
+.env
+.env.local
+
+# Test coverage
+htmlcov/
+.coverage
+.pytest_cache/
+
+# Type checking
+.mypy_cache/
+*.pyc
