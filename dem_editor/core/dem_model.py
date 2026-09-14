@@ -8,7 +8,7 @@ import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from dem_editor.core.dem_io import DEMMetadata, load_dem_file, save_dem_file
-from dem_editor.core.dem_ops import fill_nans, smooth_region, apply_arithmetic
+from dem_editor.core.dem_ops import fill_nans, fill_nans_with_info, smooth_region, apply_arithmetic
 
 
 class HistoryItem:
@@ -141,6 +141,52 @@ class DEMModel(QObject):
             self._data[r, c] = val
             self.dataChanged.emit()
 
+    def get_block(self, r_min: int, r_max: int, c_min: int, c_max: int) -> np.ndarray:
+        """Retorna copia bloque [r_min:r_max, c_min:c_max] recortado a bordes."""
+        r0, r1 = max(0, r_min), min(self._data.shape[0] - 1, r_max)
+        c0, c1 = max(0, c_min), min(self._data.shape[1] - 1, c_max)
+        return self._data[r0:r1 + 1, c0:c1 + 1].copy()
+
+    def paste_block(self, r0: int, c0: int, vals: np.ndarray, mask: np.ndarray = None,
+                    description: str = None) -> Tuple[int, int]:
+        """Pega bloque en (r0,c0). Un solo undo. mask=False salta celda.
+        Retorna (filas_pegadas, cols_pegadas). Recorta a borde."""
+        vals = np.asarray(vals, dtype=np.float64)
+        if vals.size == 0:
+            return 0, 0
+        nr = min(vals.shape[0], self._data.shape[0] - r0)
+        nc = min(vals.shape[1], self._data.shape[1] - c0)
+        if nr <= 0 or nc <= 0 or r0 < 0 or c0 < 0:
+            self.statusMessage.emit("Pegado fuera de malla: sin cambios.")
+            return 0, 0
+        v = vals[:nr, :nc]
+        m = np.ones_like(v, dtype=bool) if mask is None else np.asarray(mask[:nr, :nc], dtype=bool)
+        if not np.any(m):
+            self.statusMessage.emit("Portapapeles sin valores válidos.")
+            return 0, 0
+        # Evita undo si nada cambia
+        cur = self._data[r0:r0 + nr, c0:c0 + nc]
+        same = True
+        for idx in np.argwhere(m):
+            i, j = int(idx[0]), int(idx[1])
+            a, b = cur[i, j], v[i, j]
+            if (np.isnan(a) and np.isnan(b)) or a == b:
+                continue
+            same = False
+            break
+        if same:
+            return 0, 0
+        self._push_undo(description or f"Pegar bloque {nr}x{nc} en ({r0},{c0})")
+        tgt = self._data[r0:r0 + nr, c0:c0 + nc]
+        tgt[m] = v[m]
+        self._data[r0:r0 + nr, c0:c0 + nc] = tgt
+        self.dataChanged.emit()
+        clipped_r = vals.shape[0] - nr
+        clipped_c = vals.shape[1] - nc
+        extra = f" (recortado -{clipped_r}f -{clipped_c}c)" if (clipped_r > 0 or clipped_c > 0) else ""
+        self.statusMessage.emit(f"Pegado {nr}x{nc} en ({r0},{c0}){extra}.")
+        return nr, nc
+
     def delete_selection(self, r_min: int, r_max: int, c_min: int, c_max: int):
         """Sets selected block to NaN."""
         r_slice = slice(max(0, r_min), min(self._data.shape[0], r_max + 1))
@@ -156,8 +202,8 @@ class DEMModel(QObject):
         self.statusMessage.emit(f"Celdas borradas a NaN en [{r_min}:{r_max}, {c_min}:{c_max}]")
 
     def fill_all_nans(self, method: str = "linear"):
-        """Fills all NaNs in entire DEM using chosen interpolation method."""
-        if not np.any(np.isnan(self._data)):
+        """Fills all NaNs in entire DEM usando pipeline seguro (clip + Laplace estable)."""
+        if not np.any(~np.isfinite(self._data)):
             self.statusMessage.emit("No hay celdas NaN en el DEM para interpolar.")
             return
 
@@ -166,12 +212,69 @@ class DEMModel(QObject):
             "nearest": "Vecino más cercano",
             "cubic": "Bicúbica",
             "harmonic": "Armónica (Laplace)",
+            "fast": "Rápida (extenso)",
+            "safe": "Segura",
         }
         name = method_names.get(method, method)
+        n_bad = int(np.sum(~np.isfinite(self._data)))
+        vmin = float(np.nanmin(self._data))
+        vmax = float(np.nanmax(self._data))
         self._push_undo(f"Interpolar NaNs ({name})")
-        self._data = fill_nans(self._data, method=method)
+        self._data, info = fill_nans_with_info(self._data, method=method, clip=True)
         self.dataChanged.emit()
-        self.statusMessage.emit(f"Interpolación completada con método: {name}")
+        omin = float(np.nanmin(self._data))
+        omax = float(np.nanmax(self._data))
+        warn = ""
+        if omin < vmin - 1e-9 or omax > vmax + 1e-9:
+            warn = " [AVISO fuera rango]"
+        self.statusMessage.emit(
+            f"Interpolación {name}: {n_bad} celdas, vía {info.get('method_used')}, "
+            f"iter={info.get('n_iter', 0)} conv={info.get('converged')} "
+            f"rango [{omin:.3g},{omax:.3g}]{warn}"
+        )
+
+    def apply_funwave_correction(
+        self,
+        r_min: int, r_max: int, c_min: int, c_max: int,
+        slope_cap: float = 1.0,
+        smooth_below_depth: float = -1.0e20,
+        min_depth_frc: float = 0.1,
+        dx: Optional[float] = None,
+        dy: Optional[float] = None,
+        max_iter: int = 1000,
+        precomputed: Optional[np.ndarray] = None,
+    ) -> Dict[str, Any]:
+        """Correccion batimetria FUNWAVE-TVD (mod_bathy_correction.F) en ambito.
+        Un solo undo. precomputed = bloque ya calculado (preview) evita recomputo."""
+        from dem_editor.core.funwave_bathy import bathy_correction
+        r0, r1 = max(0, r_min), min(self._data.shape[0] - 1, r_max)
+        c0, c1 = max(0, c_min), min(self._data.shape[1] - 1, c_max)
+        ddx = self._meta.dx if dx is None else dx
+        ddy = self._meta.dy if dy is None else dy
+        if precomputed is not None:
+            new_block = np.asarray(precomputed, dtype=np.float64)
+            info = {"from_preview": True}
+        else:
+            block = self._data[r0:r1 + 1, c0:c1 + 1].copy()
+            new_block, info = bathy_correction(
+                block, dx=ddx, dy=ddy, slope_cap=slope_cap,
+                smooth_below_depth=smooth_below_depth,
+                min_depth_frc=min_depth_frc, max_iter=max_iter)
+        cur = self._data[r0:r1 + 1, c0:c1 + 1]
+        diff = np.abs(new_block - cur)
+        if not np.any(np.isfinite(diff) & (diff > 0)):
+            self.statusMessage.emit("FUNWAVE: sin pendientes sobre cap, sin cambios.")
+            return info
+        self._push_undo(f"Corrección FUNWAVE SlopeCap={slope_cap:g} [{r0}:{r1}, {c0}:{c1}]")
+        w = np.isfinite(new_block)
+        self._data[r0:r1 + 1, c0:c1 + 1][w] = new_block[w]
+        self.dataChanged.emit()
+        self.statusMessage.emit(
+            f"FUNWAVE: {info.get('n_exceed_before', '?')}→{info.get('n_exceed_after', '?')} "
+            f"celdas sobre cap, iter={info.get('n_iter', '?')} "
+            f"conv={info.get('converged', '?')} Δmáx={info.get('max_abs_change', 0):.3g}."
+        )
+        return info
 
     def smooth_selection(
         self,

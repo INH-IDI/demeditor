@@ -28,6 +28,7 @@ from dem_editor.core.dem_model import DEMModel
 from dem_editor.ui.table_view import DEMTableView
 from dem_editor.ui.minimap_widget import DEMMinimapWidget
 from dem_editor.ui.profile_widget import DEMProfileWidget
+from dem_editor.ui.bathy_dialog import BathyDialog
 from dem_editor.ui.dialogs import (
     InterpolateDialog,
     SmoothDialog,
@@ -170,6 +171,18 @@ class MainWindow(QMainWindow):
         self.act_delete_nan.setShortcut(Qt.Key.Key_Delete)
         self.act_delete_nan.triggered.connect(self.on_delete_selected_to_nan)
 
+        self.act_copy = QAction("Copiar celdas", self)
+        self.act_copy.setShortcut(QKeySequence.StandardKey.Copy)
+        self.act_copy.triggered.connect(self.on_copy_cells)
+
+        self.act_cut = QAction("Cortar celdas", self)
+        self.act_cut.setShortcut(QKeySequence.StandardKey.Cut)
+        self.act_cut.triggered.connect(self.on_cut_cells)
+
+        self.act_paste = QAction("Pegar celdas", self)
+        self.act_paste.setShortcut(QKeySequence.StandardKey.Paste)
+        self.act_paste.triggered.connect(self.on_paste_cells)
+
         self.act_fill_nans = QAction("Interpolar NaNs...", self)
         self.act_fill_nans.setShortcut("Ctrl+I")
         self.act_fill_nans.triggered.connect(self.on_interpolate_nans)
@@ -177,6 +190,10 @@ class MainWindow(QMainWindow):
         self.act_smooth = QAction("Suavizar Selección...", self)
         self.act_smooth.setShortcut("Ctrl+R")
         self.act_smooth.triggered.connect(self.on_smooth_selection)
+
+        self.act_bathy = QAction("Corrección FUNWAVE...", self)
+        self.act_bathy.setShortcut("Ctrl+B")
+        self.act_bathy.triggered.connect(self.on_bathy_correction)
 
         self.act_math = QAction("Operación Matemática...", self)
         self.act_math.setShortcut("Ctrl+M")
@@ -203,8 +220,11 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
 
         toolbar.addAction(self.act_delete_nan)
+        toolbar.addAction(self.act_copy)
+        toolbar.addAction(self.act_paste)
         toolbar.addAction(self.act_fill_nans)
         toolbar.addAction(self.act_smooth)
+        toolbar.addAction(self.act_bathy)
         toolbar.addAction(self.act_math)
         toolbar.addSeparator()
 
@@ -329,6 +349,15 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Error al Guardar", f"No se pudo guardar el archivo:\n{str(e)}")
 
+    def on_copy_cells(self):
+        self.table_view.copy_selection()
+
+    def on_cut_cells(self):
+        self.table_view.cut_selection()
+
+    def on_paste_cells(self):
+        self.table_view.paste_from_clipboard()
+
     def on_delete_selected_to_nan(self):
         bbox = self.table_view.get_selected_bounding_box()
         if bbox:
@@ -361,6 +390,11 @@ class MainWindow(QMainWindow):
                 filter_size=params["filter_size"],
                 blend=params["blend"],
             )
+
+    def on_bathy_correction(self):
+        bbox = self.table_view.get_selected_bounding_box()
+        dlg = BathyDialog(self.dem_model, scope_bbox=bbox, parent=self)
+        dlg.exec()
 
     def on_math_operation(self):
         bbox = self.table_view.get_selected_bounding_box()

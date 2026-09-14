@@ -8,6 +8,7 @@ import numpy as np
 from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, pyqtSignal, QItemSelectionModel
 from PyQt6.QtGui import QColor, QKeyEvent, QBrush, QFont
 from PyQt6.QtWidgets import (
+    QApplication,
     QTableView,
     QAbstractItemView,
     QHeaderView,
@@ -16,6 +17,14 @@ from PyQt6.QtWidgets import (
 )
 
 from dem_editor.core.dem_model import DEMModel
+
+
+from dem_editor.core.dem_clipboard import (
+    format_block_for_clipboard,
+    parse_clipboard_text,
+    resolve_paste_shape,
+    tile_source,
+)
 
 
 class FloatPrecisionDelegate(QStyledItemDelegate):
@@ -237,7 +246,81 @@ class DEMTableView(QTableView):
         cols = [idx.column() for idx in indexes]
         return min(rows), max(rows), min(cols), max(cols)
 
+    def copy_selection(self) -> bool:
+        """Copia seleccion a portapapeles sistema (TSV). True si copio."""
+        bbox = self.get_selected_bounding_box()
+        if not bbox:
+            return False
+        r_min, r_max, c_min, c_max = bbox
+        block = self._dem.get_block(r_min, r_max, c_min, c_max)
+        QApplication.clipboard().setText(format_block_for_clipboard(block))
+        self._dem.statusMessage.emit(
+            f"Copiado {block.shape[0]}x{block.shape[1]} [{r_min}:{r_max}, {c_min}:{c_max}]."
+        )
+        return True
+
+    def cut_selection(self) -> bool:
+        """Corta: copia + pone NaN."""
+        if not self.copy_selection():
+            return False
+        bbox = self.get_selected_bounding_box()
+        if bbox:
+            self._dem.delete_selection(*bbox)
+        return True
+
+    def paste_from_clipboard(self) -> bool:
+        """Pega TSV en celda actual / seleccion estilo Excel."""
+        text = QApplication.clipboard().text()
+        vals, mask = parse_clipboard_text(text)
+        if vals.size == 0 or not np.any(mask):
+            self._dem.statusMessage.emit("Portapapeles vacío o sin números.")
+            return False
+        cur = self.currentIndex()
+        sel = self.get_selected_bounding_box()
+        if cur.isValid():
+            anchor = (cur.row(), cur.column())
+        elif sel:
+            anchor = (sel[0], sel[2])
+        else:
+            return False
+        sel_shape = None
+        if sel:
+            sel_shape = (sel[1] - sel[0] + 1, sel[3] - sel[2] + 1)
+            if sel_shape != (1, 1):
+                anchor = (sel[0], sel[2])
+        r0, c0, nr, nc = resolve_paste_shape(vals.shape, anchor, sel_shape, self._dem.shape)
+        if nr <= 0 or nc <= 0:
+            self._dem.statusMessage.emit("Pegado fuera de malla: sin cambios.")
+            return False
+        tv, tm = tile_source(vals, mask, nr, nc)
+        n, _ = self._dem.paste_block(r0, c0, tv, tm)
+        if n > 0:
+            from PyQt6.QtCore import QItemSelection
+            qsel = QItemSelection(
+                self.table_model.index(r0, c0),
+                self.table_model.index(r0 + nr - 1, c0 + nc - 1),
+            )
+            self.selectionModel().select(qsel, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+            self.setCurrentIndex(self.table_model.index(r0 + nr - 1, c0 + nc - 1))
+            return True
+        return False
+
     def keyPressEvent(self, event: QKeyEvent):
+        # Ctrl+C / Ctrl+X / Ctrl+V estilo Excel (antes que edicion)
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            k = event.key()
+            if k in (Qt.Key.Key_C, Qt.Key.Key_Copy):
+                self.copy_selection()
+                event.accept()
+                return
+            if k in (Qt.Key.Key_X, Qt.Key.Key_Cut):
+                self.cut_selection()
+                event.accept()
+                return
+            if k in (Qt.Key.Key_V, Qt.Key.Key_Paste):
+                self.paste_from_clipboard()
+                event.accept()
+                return
         key = event.key()
 
         # Delete or Backspace -> Set selected cells to NaN
