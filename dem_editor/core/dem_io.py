@@ -28,10 +28,11 @@ class DEMMetadata:
         dy=1.0,
         nodata=-9999.0,
         origin_bottom=True,
+        crs="",
         extra_info=None,
     ):
         self.filename = filename
-        self.format_type = format_type  # 'funwave', 'esri_asc', 'geotiff', 'netcdf'
+        self.format_type = format_type  # 'funwave', 'esri_asc', 'geotiff', 'netcdf', 'r2s'
         self.nrows = nrows
         self.ncols = ncols
         self.x0 = x0
@@ -40,6 +41,7 @@ class DEMMetadata:
         self.dy = dy
         self.nodata = nodata
         self.origin_bottom = origin_bottom  # True: Row 0 is bottom (FUNWAVE); False: Row 0 is top (ESRI/Image)
+        self.crs = crs  # WKT, EPSG:xxxxx, or proj string
         self.extra_info = extra_info or {}
 
     def copy(self):
@@ -54,8 +56,111 @@ class DEMMetadata:
             dy=self.dy,
             nodata=self.nodata,
             origin_bottom=self.origin_bottom,
+            crs=self.crs,
             extra_info=dict(self.extra_info),
         )
+
+
+def crs_to_wkt(crs_input: str) -> str:
+    """Convert EPSG code, Proj string, or WKT to standard WKT string using GDAL OSR."""
+    if not crs_input:
+        return ""
+    try:
+        from osgeo import osr
+        srs = osr.SpatialReference()
+        crs_str = str(crs_input).strip()
+        if crs_str.isdigit():
+            srs.ImportFromEPSG(int(crs_str))
+        elif crs_str.upper().startswith("EPSG:"):
+            code = crs_str.split(":")[1].strip()
+            if code.isdigit():
+                srs.ImportFromEPSG(int(code))
+            else:
+                srs.SetFromUserInput(crs_str)
+        elif crs_str.startswith("PROJCS") or crs_str.startswith("GEOGCS") or "COMPD_CS" in crs_str:
+            srs.ImportFromWkt(crs_str)
+        else:
+            res = srs.SetFromUserInput(crs_str)
+            if res != 0:
+                return crs_str
+        return srs.ExportToWkt()
+    except Exception:
+        return str(crs_input)
+
+
+def utm_to_epsg(zone: int, north: bool = False) -> int:
+    """Get EPSG code for WGS 84 UTM zone (1-60)."""
+    if 1 <= zone <= 60:
+        return (32600 if north else 32700) + zone
+    raise ValueError(f"Zona UTM invalida: {zone}")
+
+
+def parse_crs_to_utm_info(crs_input: str):
+    """Returns (zone: int, is_north: bool) if CRS is UTM, else None."""
+    if not crs_input:
+        return None
+    try:
+        from osgeo import osr
+        srs = osr.SpatialReference()
+        crs_str = str(crs_input).strip()
+        if crs_str.isdigit():
+            srs.ImportFromEPSG(int(crs_str))
+        elif crs_str.upper().startswith("EPSG:"):
+            code = crs_str.split(":")[1].strip()
+            if code.isdigit():
+                srs.ImportFromEPSG(int(code))
+            else:
+                srs.SetFromUserInput(crs_str)
+        else:
+            wkt = crs_to_wkt(crs_str)
+            if not wkt:
+                return None
+            srs.ImportFromWkt(wkt)
+        zone = srs.GetUTMZone()
+        if zone != 0:
+            return abs(zone), zone > 0
+    except Exception:
+        pass
+    return None
+
+
+def get_crs_description(crs_input: str) -> str:
+    """Return friendly name for a CRS string, e.g. 'WGS 84 / UTM zone 19S (EPSG:32719)'."""
+    if not crs_input:
+        return "Sin definir (Local)"
+    try:
+        from osgeo import osr
+        srs = osr.SpatialReference()
+        wkt = crs_to_wkt(crs_input)
+        if not wkt:
+            return "Sin definir (Local)"
+        srs.ImportFromWkt(wkt)
+        name = srs.GetName() or "CRS Personalizado"
+        auth_code = srs.GetAuthorityCode(None)
+        if not auth_code:
+            zone = srs.GetUTMZone()
+            if zone != 0:
+                auth_code = str(utm_to_epsg(abs(zone), zone > 0))
+        if auth_code:
+            return f"{name} (EPSG:{auth_code})"
+        return name
+    except Exception:
+        return str(crs_input)
+
+
+def _find_sidecar_prj(filepath: str) -> str:
+    """Find and read companion .prj file if it exists."""
+    base, _ = os.path.splitext(filepath)
+    prj_path = base + ".prj"
+    if os.path.isfile(prj_path):
+        try:
+            with open(prj_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read().strip()
+                if content:
+                    return content
+        except Exception:
+            pass
+    return ""
 
 
 def is_esri_asc(filepath):
@@ -173,7 +278,7 @@ def load_esri_asc(filepath, origin_bottom=True):
 
 
 def save_esri_asc(filepath, data, meta: DEMMetadata, fmt="%.6g"):
-    """Save ESRI ASCII raster (.asc)."""
+    """Save ESRI ASCII raster (.asc) and companion .prj if CRS is available."""
     nrows, ncols = data.shape
     nodata = meta.nodata if meta.nodata is not None else -9999.0
     x0 = meta.x0
@@ -199,6 +304,16 @@ def save_esri_asc(filepath, data, meta: DEMMetadata, fmt="%.6g"):
     with open(filepath, "w") as f:
         f.write(header)
         np.savetxt(f, out_data, fmt=fmt, delimiter=" ")
+
+    if getattr(meta, "crs", None):
+        wkt = crs_to_wkt(meta.crs)
+        if wkt:
+            prj_path = os.path.splitext(filepath)[0] + ".prj"
+            try:
+                with open(prj_path, "w", encoding="utf-8") as f:
+                    f.write(wkt)
+            except Exception:
+                pass
 
 
 def is_r2s(filepath):
@@ -332,18 +447,27 @@ def load_geotiff(filepath, origin_bottom=True):
             if nodata is None:
                 nodata = -9999.0
 
-            buf = band.ReadRaster(0, 0, ncols, nrows)
-            # detect dtype or default to float32
-            data = np.frombuffer(buf, dtype=np.float32).reshape((nrows, ncols)).astype(np.float64)
+            # Read directly as float64 buffer to avoid dtype mismatches
+            buf = band.ReadRaster(0, 0, ncols, nrows, buf_type=gdal.GDT_Float64)
+            data = np.frombuffer(buf, dtype=np.float64).reshape((nrows, ncols)).copy()
 
             gt = ds.GetGeoTransform()
-            x0 = gt[0]
-            dx = gt[1]
-            dy = abs(gt[5]) if abs(gt[5]) > 0 else 1.0
-            y0 = gt[3] - nrows * dy
+            if gt is not None and len(gt) >= 6:
+                x0 = float(gt[0])
+                dx = abs(float(gt[1])) if abs(float(gt[1])) > 0 else 1.0
+                dy = abs(float(gt[5])) if abs(float(gt[5])) > 0 else 1.0
+                y0 = float(gt[3]) - nrows * dy
+            else:
+                x0 = 0.0
+                y0 = 0.0
+                dx = 1.0
+                dy = 1.0
+
+            crs = ds.GetProjectionRef() or ""
 
             mask = np.isclose(data, nodata, equal_nan=False)
             data[mask] = np.nan
+            data[~np.isfinite(data)] = np.nan
 
             if origin_bottom:
                 data = np.flipud(data).copy()
@@ -359,6 +483,7 @@ def load_geotiff(filepath, origin_bottom=True):
                 dy=dy,
                 nodata=nodata,
                 origin_bottom=origin_bottom,
+                crs=crs,
             )
             ds = None
             return data, meta
@@ -384,12 +509,13 @@ def load_geotiff(filepath, origin_bottom=True):
         dy=1.0,
         nodata=-9999.0,
         origin_bottom=origin_bottom,
+        crs="",
     )
     return data, meta
 
 
 def save_geotiff(filepath, data, meta: DEMMetadata):
-    """Save GeoTIFF file using GDAL WriteRaster."""
+    """Save GeoTIFF file using GDAL WriteRaster with spatial reference (UTM/CRS)."""
     nrows, ncols = data.shape
     nodata = meta.nodata if meta.nodata is not None else -9999.0
 
@@ -399,21 +525,36 @@ def save_geotiff(filepath, data, meta: DEMMetadata):
 
     nan_mask = np.isnan(out_data)
     out_data[nan_mask] = nodata
-    out_arr = out_data.astype(np.float32)
+    out_arr = np.ascontiguousarray(out_data, dtype=np.float32)
 
     try:
         from osgeo import gdal
         driver = gdal.GetDriverByName("GTiff")
+        if driver is None:
+            raise RuntimeError("GDAL GTiff driver no disponible.")
         ds = driver.Create(filepath, ncols, nrows, 1, gdal.GDT_Float32)
+        if ds is None:
+            raise IOError(f"GDAL no pudo crear el archivo GeoTIFF en {filepath}")
+
         y_top_left = meta.y0 + nrows * meta.dy
         ds.SetGeoTransform([meta.x0, meta.dx, 0.0, y_top_left, 0.0, -meta.dy])
+
+        if getattr(meta, "crs", None):
+            wkt = crs_to_wkt(meta.crs)
+            if wkt:
+                ds.SetProjection(wkt)
 
         band = ds.GetRasterBand(1)
         band.SetNoDataValue(nodata)
         band.WriteRaster(0, 0, ncols, nrows, out_arr.tobytes())
         band.FlushCache()
+        ds.FlushCache()
+        band = None
         ds = None
-    except Exception:
+    except Exception as e:
+        import sys
+        if "osgeo" in sys.modules:
+            raise
         import tifffile
         tifffile.imwrite(filepath, out_arr)
 
@@ -519,15 +660,22 @@ def load_dem_file(filepath, origin_bottom=True):
     ext = os.path.splitext(filepath)[1].lower()
 
     if ext in [".tif", ".tiff"]:
-        return load_geotiff(filepath, origin_bottom=origin_bottom)
+        data, meta = load_geotiff(filepath, origin_bottom=origin_bottom)
     elif ext == ".nc":
-        return load_netcdf(filepath, origin_bottom=origin_bottom)
+        data, meta = load_netcdf(filepath, origin_bottom=origin_bottom)
     elif ext == ".r2s" or is_r2s(filepath):
-        return load_r2s(filepath, origin_bottom=origin_bottom)
+        data, meta = load_r2s(filepath, origin_bottom=origin_bottom)
     elif ext == ".asc" or is_esri_asc(filepath):
-        return load_esri_asc(filepath, origin_bottom=origin_bottom)
+        data, meta = load_esri_asc(filepath, origin_bottom=origin_bottom)
     else:
-        return load_ascii_funwave(filepath, origin_bottom=origin_bottom)
+        data, meta = load_ascii_funwave(filepath, origin_bottom=origin_bottom)
+
+    if not getattr(meta, "crs", ""):
+        sidecar = _find_sidecar_prj(filepath)
+        if sidecar:
+            meta.crs = sidecar
+
+    return data, meta
 
 
 def save_dem_file(filepath, data, meta: DEMMetadata, fmt=None):

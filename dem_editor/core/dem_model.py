@@ -96,6 +96,12 @@ class DEMModel(QObject):
             self.metadataChanged.emit()
             self.dataChanged.emit()
 
+    def set_crs(self, crs: str):
+        """Sets CRS for the DEM metadata."""
+        if getattr(self._meta, "crs", "") != crs:
+            self._meta.crs = crs
+            self.metadataChanged.emit()
+
     def _push_undo(self, description: str):
         """Saves current state to undo stack."""
         self._undo_stack.append(HistoryItem(self._data, description))

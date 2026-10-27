@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
 )
 
 from dem_editor.core.dem_model import DEMModel
+from dem_editor.core.dem_io import get_crs_description, parse_crs_to_utm_info
 from dem_editor.ui.table_view import DEMTableView
 from dem_editor.ui.minimap_widget import DEMMinimapWidget
 from dem_editor.ui.profile_widget import DEMProfileWidget
@@ -34,6 +35,7 @@ from dem_editor.ui.dialogs import (
     SmoothDialog,
     MathDialog,
     GridPropertiesDialog,
+    AssignUTMDialog,
 )
 from dem_editor.ui.styles import DARK_THEME, LIGHT_THEME
 
@@ -58,6 +60,7 @@ class MainWindow(QMainWindow):
         self.dem_model.historyChanged.connect(self._update_undo_redo_actions)
         self.dem_model.statusMessage.connect(self.statusBar().showMessage)
         self.dem_model.dataChanged.connect(self._update_stats_display)
+        self.dem_model.metadataChanged.connect(self._on_metadata_changed)
 
         # Load file if provided
         if initial_filepath and os.path.isfile(initial_filepath):
@@ -237,9 +240,11 @@ class MainWindow(QMainWindow):
 
         self.lbl_cursor_info = QLabel("Fila: - | Col: - | Z: -")
         self.lbl_dim_info = QLabel("0 × 0")
+        self.lbl_crs_info = QLabel("CRS: Sin definir")
 
         status.addPermanentWidget(self.lbl_cursor_info)
         status.addPermanentWidget(self.lbl_dim_info)
+        status.addPermanentWidget(self.lbl_crs_info)
 
     def _apply_theme(self, theme_name: str):
         self.current_theme = theme_name
@@ -262,6 +267,13 @@ class MainWindow(QMainWindow):
     def _on_orient_changed(self):
         val = self.combo_orient.currentData()
         self.dem_model.set_origin_bottom(val)
+
+    def _on_metadata_changed(self):
+        self._update_crs_display()
+
+    def _update_crs_display(self):
+        crs_desc = get_crs_description(self.dem_model.metadata.crs)
+        self.lbl_crs_info.setText(f"CRS: {crs_desc}")
 
     def _update_undo_redo_actions(self, can_undo: bool, can_redo: bool):
         self.act_undo.setEnabled(can_undo)
@@ -310,6 +322,7 @@ class MainWindow(QMainWindow):
             self.combo_orient.setCurrentIndex(0 if self.dem_model.metadata.origin_bottom else 1)
             self.table_view.scroll_to_cell(0, 0)
             self._update_stats_display()
+            self._update_crs_display()
             self.setWindowTitle(f"DEM Editor - {os.path.basename(filepath)}")
         except Exception as e:
             QMessageBox.critical(self, "Error al Cargar", f"No se pudo cargar el archivo:\n{str(e)}")
@@ -328,9 +341,20 @@ class MainWindow(QMainWindow):
         if not self.dem_model.metadata.filename:
             self.on_save_as_file()
             return
+        target = self.dem_model.metadata.filename
+        ext = os.path.splitext(target)[1].lower()
+        if ext in [".tif", ".tiff"] and not self.dem_model.metadata.crs:
+            utm_info = parse_crs_to_utm_info(self.dem_model.metadata.crs)
+            default_zone = utm_info[0] if utm_info else 19
+            default_north = utm_info[1] if utm_info else False
+            dlg = AssignUTMDialog(default_zone=default_zone, is_north=default_north, parent=self)
+            if dlg.exec():
+                self.dem_model.set_crs(dlg.get_crs())
+            else:
+                return
         try:
             self.dem_model.save_file()
-            QMessageBox.information(self, "Guardado", "Archivo guardado exitosamente.")
+            QMessageBox.information(self, "Guardado", f"Archivo guardado exitosamente:\n{target}")
         except Exception as e:
             QMessageBox.critical(self, "Error al Guardar", f"No se pudo guardar el archivo:\n{str(e)}")
 
@@ -339,11 +363,49 @@ class MainWindow(QMainWindow):
             self,
             "Guardar DEM Como",
             self.dem_model.metadata.filename or "dem_editado.dep",
-            "FUNWAVE ASCII (*.dep);;ESRI ASCII Raster (*.asc);;GeoTIFF (*.tif);;NetCDF (*.nc);;Blue Kenue r2s (*.r2s);;Texto (*.txt)",
+            "GeoTIFF (*.tif);;ESRI ASCII Raster (*.asc);;FUNWAVE ASCII (*.dep);;Blue Kenue r2s (*.r2s);;NetCDF (*.nc);;Texto (*.txt)",
         )
         if filepath:
+            ext = os.path.splitext(filepath)[1].lower()
+            fmt = None
+            if "GeoTIFF" in selected_filter:
+                fmt = "geotiff"
+                if not ext:
+                    filepath += ".tif"
+                    ext = ".tif"
+            elif "ESRI" in selected_filter:
+                fmt = "esri_asc"
+                if not ext:
+                    filepath += ".asc"
+                    ext = ".asc"
+            elif "NetCDF" in selected_filter:
+                fmt = "netcdf"
+                if not ext:
+                    filepath += ".nc"
+                    ext = ".nc"
+            elif "Blue Kenue" in selected_filter:
+                fmt = "r2s"
+                if not ext:
+                    filepath += ".r2s"
+                    ext = ".r2s"
+            elif "FUNWAVE" in selected_filter:
+                fmt = "funwave"
+                if not ext:
+                    filepath += ".dep"
+                    ext = ".dep"
+
+            if (fmt == "geotiff" or ext in [".tif", ".tiff"]) and not self.dem_model.metadata.crs:
+                utm_info = parse_crs_to_utm_info(self.dem_model.metadata.crs)
+                default_zone = utm_info[0] if utm_info else 19
+                default_north = utm_info[1] if utm_info else False
+                dlg = AssignUTMDialog(default_zone=default_zone, is_north=default_north, parent=self)
+                if dlg.exec():
+                    self.dem_model.set_crs(dlg.get_crs())
+                else:
+                    return
+
             try:
-                self.dem_model.save_file(filepath)
+                self.dem_model.save_file(filepath, fmt=fmt)
                 self.setWindowTitle(f"DEM Editor - {os.path.basename(filepath)}")
                 QMessageBox.information(self, "Guardado", f"Archivo guardado exitosamente:\n{filepath}")
             except Exception as e:
