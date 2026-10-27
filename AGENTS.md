@@ -22,7 +22,7 @@ PyQt6 scientific 2D DEM/bathymetry grid editor (FUNWAVE-TVD). No `requirements.t
 
 ## Commands (system `python3`, no venv)
 - Run GUI: `python3 main.py [file.dep]` or `./run_editor.sh [file]` — needs display, never run headless in agent (blocks).
-- All tests: `python3 -m pytest tests/ -q` (~0.8s, 20 tests).
+- All tests: `python3 -m pytest tests/ -q` (~0.8s, 24 tests).
 - Single test: `python3 -m pytest tests/test_fill_nans.py::test_fast_large -q`.
 - Deps preinstalled (py3.12): `PyQt6`, `numpy`, `scipy`, `GDAL (osgeo)`, `netCDF4`. Do not `pip install`; `tifffile` not used (GDAL handles `.tif`).
 
@@ -34,7 +34,7 @@ PyQt6 scientific 2D DEM/bathymetry grid editor (FUNWAVE-TVD). No `requirements.t
 
 ## Data conventions (do not guess)
 - Memory: missing = `np.nan`; `inf` sanitized to `NaN` (`dem_ops._sanitize`). Never store `-9999` in array.
-- Disk: `NODATA_value -9999` for `.asc`/`.tif`/`.nc`. Lazy imports: `osgeo.gdal`, `netCDF4` inside `dem_io.py` functions.
+- Disk: `NODATA_value -9999` for `.asc`/`.tif`/`.nc`.  `.r2s` (Blue Kenue 2D Rect Scalar, `:EndHeader` then rows; row 0 = South, no flip; `:NoDataValue` honored; single attribute, `:Angle 0` only). Lazy imports: `osgeo.gdal`, `netCDF4` inside `dem_io.py` functions.
 - Orientation: `DEMMetadata.origin_bottom=True` = FUNWAVE (row 0 = South/Y=0). Preserve flag on load/save; do not flip.
 - `.dep/.txt/.dat` = Depth: positive water, negative land. No sign flip anywhere.
 - Table: keep virtualized `QAbstractTableModel` (`DEMTableModel`). No per-cell widgets; must handle >500×500. NaN = soft-red cells, magenta in minimap.

@@ -4,6 +4,7 @@ Scientific I/O module for Digital Elevation Models (DEM) and bathymetric grids.
 Supports:
 - Raw ASCII / FUNWAVE depth files (.dep, .txt, .dat)
 - ESRI ASCII Raster (.asc)
+- Blue Kenue / EnSim 2D Rect Scalar (.r2s)
 - GeoTIFF (.tif, .tiff)
 - NetCDF (.nc)
 """
@@ -195,6 +196,124 @@ def save_esri_asc(filepath, data, meta: DEMMetadata, fmt="%.6g"):
         f"NODATA_value  {nodata:.6f}\n"
     )
 
+    with open(filepath, "w") as f:
+        f.write(header)
+        np.savetxt(f, out_data, fmt=fmt, delimiter=" ")
+
+
+def is_r2s(filepath):
+    """Check if file is an EnSim/Blue Kenue r2s file (':FileType r2s' header)."""
+    try:
+        with open(filepath, "r", errors="ignore") as f:
+            for _ in range(10):
+                line = f.readline()
+                if not line:
+                    break
+                if line.strip().lower().startswith(":filetype") and "r2s" in line.lower():
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def load_r2s(filepath, origin_bottom=True):
+    """Load Blue Kenue / EnSim r2s (2D Rect Scalar) ASCII grid.
+
+    r2s stores row 0 at yOrigin (southernmost), rows increasing northwards, so no
+    flip is needed when origin_bottom=True (FUNWAVE). Values are kept as-is
+    (no sign flip). NoDataValue cells become NaN.
+    """
+    header = {}
+    with open(filepath, "r", errors="ignore") as f:
+        lines = f.read().splitlines()
+
+    data_start = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.lower().startswith(":endheader"):
+            data_start = i + 1
+            break
+        if stripped.startswith(":"):
+            tokens = stripped.split(None, 1)
+            key = tokens[0][1:].lower()
+            value = tokens[1].split("#")[0].strip() if len(tokens) > 1 else ""
+            header.setdefault(key, value)
+    if data_start is None:
+        raise ValueError("Archivo r2s invalido: falta :EndHeader")
+
+    try:
+        ncols = int(header["xcount"])
+        nrows = int(header["ycount"])
+    except (KeyError, ValueError):
+        raise ValueError("Archivo r2s invalido: faltan :xCount / :yCount")
+    dx = float(header.get("xdelta", 1.0))
+    dy = float(header.get("ydelta", 1.0))
+    x0 = float(header.get("xorigin", 0.0))
+    y0 = float(header.get("yorigin", 0.0))
+    nodata = float(header.get("nodatavalue", -9999.0))
+    if abs(float(header.get("angle", 0.0))) > 1e-9:
+        raise ValueError("r2s con :Angle != 0 no soportado")
+
+    n_attr = 1
+    for line in lines[:data_start]:
+        if line.strip().lower().startswith(":attributename"):
+            n_attr = max(n_attr, int(line.split()[1]))
+    if n_attr > 1:
+        raise ValueError("r2s con multiples atributos no soportado")
+
+    values = np.array(" ".join(lines[data_start:]).split(), dtype=np.float64)
+    if values.size != nrows * ncols:
+        raise ValueError(f"r2s: {values.size} valores, se esperaban {nrows * ncols} ({nrows}x{ncols})")
+    data = values.reshape((nrows, ncols))
+
+    data[np.isclose(data, nodata, equal_nan=False)] = np.nan
+    data[~np.isfinite(data)] = np.nan
+
+    if not origin_bottom:
+        data = np.flipud(data).copy()
+
+    meta = DEMMetadata(
+        filename=filepath,
+        format_type="r2s",
+        nrows=nrows,
+        ncols=ncols,
+        x0=x0,
+        y0=y0,
+        dx=dx,
+        dy=dy,
+        nodata=nodata,
+        origin_bottom=origin_bottom,
+        extra_info=header,
+    )
+    return data, meta
+
+
+def save_r2s(filepath, data, meta: DEMMetadata, fmt="%.6g"):
+    """Save Blue Kenue / EnSim r2s (2D Rect Scalar) ASCII grid."""
+    nrows, ncols = data.shape
+    nodata = meta.nodata if meta.nodata is not None else -9999.0
+
+    out_data = data.copy()
+    if not meta.origin_bottom:
+        out_data = np.flipud(out_data)
+    out_data[np.isnan(out_data)] = nodata
+
+    header = (
+        ":FileType r2s  ASCII  EnSim 1.0\n"
+        "# DataType    2D Rect Scalar\n"
+        ":Application  DEMEditor\n"
+        f":NoDataValue {nodata:g}\n"
+        ":AttributeName 1 Value\n"
+        ":AttributeType 1 double\n"
+        f":xOrigin {meta.x0:.6f}\n"
+        f":yOrigin {meta.y0:.6f}\n"
+        f":xCount {ncols}\n"
+        f":yCount {nrows}\n"
+        f":xDelta {meta.dx:g}\n"
+        f":yDelta {meta.dy:g}\n"
+        ":Angle 0.000000\n"
+        ":EndHeader\n"
+    )
     with open(filepath, "w") as f:
         f.write(header)
         np.savetxt(f, out_data, fmt=fmt, delimiter=" ")
@@ -403,6 +522,8 @@ def load_dem_file(filepath, origin_bottom=True):
         return load_geotiff(filepath, origin_bottom=origin_bottom)
     elif ext == ".nc":
         return load_netcdf(filepath, origin_bottom=origin_bottom)
+    elif ext == ".r2s" or is_r2s(filepath):
+        return load_r2s(filepath, origin_bottom=origin_bottom)
     elif ext == ".asc" or is_esri_asc(filepath):
         return load_esri_asc(filepath, origin_bottom=origin_bottom)
     else:
@@ -419,6 +540,8 @@ def save_dem_file(filepath, data, meta: DEMMetadata, fmt=None):
             fmt = "netcdf"
         elif ext == ".asc":
             fmt = "esri_asc"
+        elif ext == ".r2s":
+            fmt = "r2s"
         else:
             fmt = "funwave"
 
@@ -426,6 +549,8 @@ def save_dem_file(filepath, data, meta: DEMMetadata, fmt=None):
         save_geotiff(filepath, data, meta)
     elif fmt == "netcdf" or ext == ".nc":
         save_netcdf(filepath, data, meta)
+    elif fmt == "r2s" or ext == ".r2s":
+        save_r2s(filepath, data, meta)
     elif fmt == "esri_asc" or ext == ".asc":
         save_esri_asc(filepath, data, meta)
     else:

@@ -319,7 +319,7 @@ class MainWindow(QMainWindow):
             self,
             "Abrir Archivo DEM",
             "",
-            "Archivos DEM (*.dep *.asc *.txt *.dat *.tif *.tiff *.nc);;FUNWAVE ASCII (*.dep *.txt *.dat);;ESRI ASC (*.asc);;GeoTIFF (*.tif *.tiff);;NetCDF (*.nc);;Todos (*.*)",
+            "Archivos DEM (*.dep *.asc *.txt *.dat *.tif *.tiff *.nc *.r2s);;FUNWAVE ASCII (*.dep *.txt *.dat);;ESRI ASC (*.asc);;Blue Kenue r2s (*.r2s);;GeoTIFF (*.tif *.tiff);;NetCDF (*.nc);;Todos (*.*)",
         )
         if filepath:
             self.load_file(filepath)
@@ -339,7 +339,7 @@ class MainWindow(QMainWindow):
             self,
             "Guardar DEM Como",
             self.dem_model.metadata.filename or "dem_editado.dep",
-            "FUNWAVE ASCII (*.dep);;ESRI ASCII Raster (*.asc);;GeoTIFF (*.tif);;NetCDF (*.nc);;Texto (*.txt)",
+            "FUNWAVE ASCII (*.dep);;ESRI ASCII Raster (*.asc);;GeoTIFF (*.tif);;NetCDF (*.nc);;Blue Kenue r2s (*.r2s);;Texto (*.txt)",
         )
         if filepath:
             try:
