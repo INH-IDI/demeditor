@@ -16,42 +16,39 @@ Boundaries: code/commits/PRs written normal.
 
 ---
 
-# DEM EDITOR — Project Context for Agents
+# DEM EDITOR — Agent Notes
 
-## Project Overview
-Scientific 2D Digital Elevation Model (DEM) and Bathymetry Grid Editor. Designed for coastal/ocean hydrodynamic modeling (FUNWAVE-TVD) and geospatial raster manipulation.
+PyQt6 scientific 2D DEM/bathymetry grid editor (FUNWAVE-TVD). No `requirements.txt` / `pyproject.toml` / lint / typecheck / CI workflows. Same caveman rules duplicated in `.github/copilot-instructions.md`, `.cursor/rules/caveman.mdc`, `.clinerules/caveman.md`, `.windsurf/rules/caveman.md` — edit here, not there.
 
-## Tech Stack
-- **Language**: Python 3.12+
-- **GUI Framework**: PyQt6
-- **Numerical Engines**: NumPy, SciPy (scipy.ndimage, scipy.interpolate)
-- **Spatial I/O**: GDAL, NetCDF4, tifffile, Matplotlib colormaps
+## Commands (system `python3`, no venv)
+- Run GUI: `python3 main.py [file.dep]` or `./run_editor.sh [file]` — needs display, never run headless in agent (blocks).
+- All tests: `python3 -m pytest tests/ -q` (~0.8s, 20 tests).
+- Single test: `python3 -m pytest tests/test_fill_nans.py::test_fast_large -q`.
+- Deps preinstalled (py3.12): `PyQt6`, `numpy`, `scipy`, `GDAL (osgeo)`, `netCDF4`. Do not `pip install`; `tifffile` not used (GDAL handles `.tif`).
 
-## Core Conventions
-1. **Coordinate Orientation**:
-   - FUNWAVE mode: Row 0 is at bottom (South, Y=0).
-   - Standard mode: Row 0 is at top (North).
-2. **Missing / Empty Data**:
-   - Represented as `np.nan` in array memory.
-   - Saved with standard sentinel (e.g. `NODATA_value -9999`) in ESRI ASC, GeoTIFF, and NetCDF.
-   - Displayed with soft red highlight in table grid and magenta in global minimap.
-3. **Table Performance**:
-   - Must use virtualized `QAbstractTableModel` (`DEMTableModel`) to support grids > 500x500 without UI freeze.
+## Architecture
+- Entrypoints: `main.py` → `dem_editor/ui/main_window.py` (`MainWindow`).
+- `dem_editor/core/`: `dem_model.py` (reactive `QObject`, sole state owner), `dem_io.py`, `dem_ops.py`, `funwave_bathy.py`, `dem_clipboard.py`.
+- `dem_editor/ui/`: `table_view.py`, `minimap_widget.py`, `profile_widget.py`, `dialogs.py`, `bathy_dialog.py`, `main_window.py`.
+- `DEMModel` signals: `dataChanged / metadataChanged / historyChanged(can_undo,can_redo) / statusMessage`. Mutate via model methods only (`paste_block`, fill/smooth wrappers) so undo + views stay in sync. `max_history=30`, one `HistoryItem` per user op (paste = single undo).
 
-## Key Files
-- `main.py` / `run_editor.sh`: Application entrypoints.
-- `dem_editor/core/dem_model.py`: Reactive state model, Undo/Redo history stack.
-- `dem_editor/core/dem_io.py`: File loaders/savers for ASCII (.dep), ESRI (.asc), GeoTIFF (.tif), NetCDF (.nc).
-- `dem_editor/core/dem_ops.py`: Numerical operations (fill NaNs: linear/nearest/cubic/harmonic; smoothing: gaussian/box/median).
-- `dem_editor/ui/main_window.py`: Main window, toolbar, docking, status bar.
-- `dem_editor/ui/table_view.py`: Virtualized Excel-style table view.
-- `dem_editor/ui/minimap_widget.py`: 2D minimap with synchronized viewport bounding box.
-- `dem_editor/ui/profile_widget.py`: Real-time 1D cross-section transects (X/Y).
+## Data conventions (do not guess)
+- Memory: missing = `np.nan`; `inf` sanitized to `NaN` (`dem_ops._sanitize`). Never store `-9999` in array.
+- Disk: `NODATA_value -9999` for `.asc`/`.tif`/`.nc`. Lazy imports: `osgeo.gdal`, `netCDF4` inside `dem_io.py` functions.
+- Orientation: `DEMMetadata.origin_bottom=True` = FUNWAVE (row 0 = South/Y=0). Preserve flag on load/save; do not flip.
+- `.dep/.txt/.dat` = Depth: positive water, negative land. No sign flip anywhere.
+- Table: keep virtualized `QAbstractTableModel` (`DEMTableModel`). No per-cell widgets; must handle >500×500. NaN = soft-red cells, magenta in minimap.
 
-## How to Test & Run
-```bash
-# Run application
-python3 main.py [optional_path_to_dem]
-# Or via launcher
-./run_editor.sh
-```
+## Numerical gotchas (hard-earned, see `dem_ops.py` header + tests)
+- `fill_nans`: `cubic`/`linear` clamped to `[vmin,vmax]` (Clough-Tocher overshoot); all-NaN input returns all-NaN (not zeros).
+- `harmonic`: stable Jacobi `omega=1.0` only. SOR/Jacobi `omega=1.6` diverges (±1e91). Keep divergence guard + max-principle clamp.
+- `griddata` Delaunay only if `cells <= 500*500` and `valid_points <= 30_000` (`_GRIDDATA_MAX_*`); else fast local fallback. `test_fast_large` (600×600) must hit fast path — check `info["method_used"]`.
+- `funwave_bathy.py` replicates `mod_bathy_correction.F` exactly: `Grad=|D(c+1)-D(c-1)|/DX` (no `/2`); stencil `0.4*center + 0.15*(N+S+E+O)` Jacobi, mass-conserving; symmetric-peak center has grad 0, never touched; edges `pad edge` (Neumann, Fortran ghost-cell equiv); NaN never updated, stencil renormalizes; `SmoothBelowDepth` mask excludes cells + 4-neighbors (land stays intact).
+- Clipboard (`dem_clipboard.py`): TSV with `\t` then `;` fallback; ES comma decimals (`3,14`, `1.234,56`); `NAN_TOKENS={"",nan,null,none,-,na,n/a,nd}`; invalid token → `mask=False`, destination cell untouched; strip Excel trailing `\n`; single-cell source tiles over selection; clip at grid border.
+
+## Testing quirks
+- Qt tests need headless: `os.environ.setdefault("QT_QPA_PLATFORM","offscreen")` before `QApplication` (see `tests/test_copy_paste.py`). New Qt-touching tests must copy this.
+- Code uses `PyQt6` only; env also has `PyQt5` installed — do not import it.
+
+## Git / files
+- `.gitignore` blocks `*.dep *.nc *.tif* *.asc *.dat *.txt *.png *.log`, `__pycache__/`, `.pytest_cache/`. Sample `.dep` + `screenshot_preview.png` in root are local-only. Never `git add` data/screenshots.
